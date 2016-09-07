@@ -10,17 +10,17 @@ As you can see, the `sayHello()` method is implemented using a lambda.  An impor
 
 If you've used a Java based web framework before, you may be familiar with using annotations for composition of cross cutting concerns.  Annotations have their limits - they don't compose, that is, if you have two different annotations that you want to apply to many different methods, it's not straight forward to simply create a new annotation that combines them.  In contrast, functions are just methods, if you want to compose two methods together, you create a new method that invokes both of them.  Additionally, you're in complete control over how they get composed, you know exactly what order they are composed in, as opposed to annotations where it's up to the framework to magically read them via reflection and somehow gain meaning from that.
 
-Now let's have a look at our [ServiceCall](api/java/index.html?com/lightbend/lagom/javadsl/api/ServiceCall.html) interface again:
+Now let's have a look at our [ServiceCall](api/index.html?com/lightbend/lagom/javadsl/api/ServiceCall.html) interface again:
 
 ```java
-interface ServiceCall<Id, Request, Response> {
-  CompletionStage<Response> invoke(Id id, Request request);
+interface ServiceCall<Request, Response> {
+  CompletionStage<Response> invoke(Request request);
 }
 ```
 
-It will take the id and the request, and return the response as a [`CompletionStage`](https://docs.oracle.com/javase/8/docs/api/java/util/concurrent/CompletionStage.html).  If you've never seen `CompletionStage` before, it is a promise.  When an API returns a promise, that value might not yet be computed, but the API promises that at some point in future, it will be.  Since the value isn't computed yet, you can't interact with it immediately.  What you can do though is attach callbacks that transform the promise to a promise of a new value, using the `thenApply` and `thenCompose` methods.  `CompletionStage` with its `thenApply` and `thenCompose` methods are fundamental building blocks for building reactive applications in Java, they allow your code to be asynchronous, not waiting for things to happen, but attaching callback that react to computations being completed.
+It will take the request, and return the response as a [`CompletionStage`](https://docs.oracle.com/javase/8/docs/api/util/concurrent/CompletionStage.html).  If you've never seen `CompletionStage` before, it is a promise.  When an API returns a promise, that value might not yet be computed, but the API promises that at some point in future, it will be.  Since the value isn't computed yet, you can't interact with it immediately.  What you can do though is attach callbacks that transform the promise to a promise of a new value, using the `thenApply` and `thenCompose` methods.  `CompletionStage` with its `thenApply` and `thenCompose` methods are fundamental building blocks for building reactive applications in Java, they allow your code to be asynchronous, not waiting for things to happen, but attaching callback that react to computations being completed.
 
-Of course, a simple hello world computation is not asynchronous, all it needs is to concatenate two Strings, and that returns immediately.  In this case, we need to wrap the result of that in a `CompletionStage`.  This can be done by calling `CompletableFuture.completedFuture()`, which returns a subclass of `CompletionStage` wrapping an immediately available value.  As a convenience, Lagom provides a `sync` method on [`Service`](api/java/index.html?com/lightbend/lagom/javadsl/api/Service.html) that does this for you.  It's being used in our `sayHello` implementation.
+Of course, a simple hello world computation is not asynchronous, all it needs is to concatenate two Strings, and that returns immediately.  In this case, we need to wrap the result of that in a `CompletionStage`.  This can be done by calling `CompletableFuture.completedFuture()`, which returns a subclass of `CompletionStage` wrapping an immediately available value.  As a convenience, Lagom provides a `sync` method on [`Service`](api/index.html?com/lightbend/lagom/javadsl/api/Service.html) that does this for you.  It's being used in our `sayHello` implementation.
 
 Having provided an implementation of the service, we can now register that with the Lagom framework.  Lagom is built on top of Play Framework, and so uses Play's Guice based [dependency injection support](https://playframework.com/documentation/2.5.x/JavaDependencyInjection) to register components.  To register a service, you'll need to implement a Guice module.  This can be done by creating a class called `Module` in the root package:
 
@@ -34,7 +34,7 @@ By convention, Play will automatically load a module called `Module` in the root
 
 ## Working with streams
 
-When the request and response bodies are strict, working with them as quite straight forward.  If however they are streamed, you'll need to use Akka streams to work with them.  Let's take a look at how some of the streamed service calls in the [[service descriptors|ServiceDescriptors#Streamed-messages]] examples might be implemented.
+When the request and response bodies are strict, working with them is straightforward.  If they are streamed, however, you'll need to use Akka streams to work with them.  Let's take a look at how some of the streamed service calls in the [[service descriptors|ServiceDescriptors#Streamed-messages]] examples might be implemented.
 
 The `tick` service call is going to return a `Source` that sends messages at the specified interval.  Akka streams has a helpful constructor for such a stream:
 
@@ -54,7 +54,7 @@ These examples of working with streams are obviously quite trivial.  The section
 
 Sometimes you may need to handle the request header, or add information to the response header.  `ServiceCall` provides `handleRequestHeader` and `handleResponseHeader` methods to allow you to do this, however it is not recommended that you implement this directly, rather, you should use `ServerServiceCall`.
 
-`ServerServiceCall` is an interface that extends `ServiceCall`, and provides an additional method, `invokeWithHeaders`.  This is different from the regular `invoke` method because in addition to the `Id` and `Request` parameters, it also accepts a `RequestHeader` parameter.  And rather than returning a `CompletionStage<Response>`, it returns a `CompletionStage<Pair<ResponseHeader, Response>>`.  Hence it allows you to handle the request header, and send a custom response header.  `ServerServiceCall` implements the `handleRequestHeader` and `handleResponseHeader` methods, so that when Lagom calls the `invoke` method, it is delegated to the `invokeWithHeaders` method.
+`ServerServiceCall` is an interface that extends `ServiceCall`, and provides an additional method, `invokeWithHeaders`.  This is different from the regular `invoke` method because in addition to the `Request` parameter, it also accepts a `RequestHeader` parameter.  And rather than returning a `CompletionStage<Response>`, it returns a `CompletionStage<Pair<ResponseHeader, Response>>`.  Hence it allows you to handle the request header, and send a custom response header.  `ServerServiceCall` implements the `handleRequestHeader` and `handleResponseHeader` methods, so that when Lagom calls the `invoke` method, it is delegated to the `invokeWithHeaders` method.
 
 `ServerServiceCall` is a functional interface, leaving the original `invoke` method abstract, so when an interface requires you to pass or return a `ServerServiceCall`, if you implement it with a lambda, you aren't forced to handle the headers.  An additional functional interface is provided, `HeaderServiceCall`, this extends `ServerServiceCall` and makes `invokeWithHeaders` the abstract method.  This can be used to handle headers with a lambda implemented service call, in two ways.
 

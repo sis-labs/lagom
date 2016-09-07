@@ -7,19 +7,22 @@ import java.net.URI
 import java.util.Optional
 import java.util.concurrent.CompletionStage
 import java.util.function.{ Function => JFunction }
-import javax.inject.{ Provider, Inject, Singleton }
+import javax.inject.{ Inject, Provider, Singleton }
 
 import akka.stream.Materializer
 import com.google.inject.AbstractModule
-import com.lightbend.lagom.internal.client.{ CircuitBreaker, ServiceClientLoader, ServiceClientImplementor, WebSocketClient }
+import com.lightbend.lagom.internal.client._
+import com.lightbend.lagom.javadsl.api.Descriptor.Call
 import com.lightbend.lagom.javadsl.api.transport.NotFound
-import com.lightbend.lagom.javadsl.api.{ ServiceLocator, ServiceInfo }
+import com.lightbend.lagom.javadsl.api.{ ServiceInfo, ServiceLocator }
+import com.lightbend.lagom.javadsl.client.CircuitBreakingServiceLocator
 import com.lightbend.lagom.javadsl.jackson.{ JacksonExceptionSerializer, JacksonSerializerFactory }
-import play.api.{ Mode, Configuration, Environment, Logger }
+import play.api.{ Configuration, Environment, Logger, Mode }
 import play.api.libs.ws.WSClient
 
 import scala.concurrent.{ ExecutionContext, Future }
 import scala.util.{ Failure, Success }
+import scala.compat.java8.FutureConverters._
 
 class ServiceRegistryModule(environment: Environment, configuration: Configuration) extends AbstractModule {
   private val logger = Logger(this.getClass)
@@ -34,13 +37,6 @@ class ServiceRegistryModule(environment: Environment, configuration: Configurati
           "bound to an implementation that will query the embedded Service Locator. This is fine to use " +
           "only during development."
       }
-    } else if (environment.mode == Mode.Test) {
-      logger.debug {
-        s"Running in ${environment.mode} mode, the ${classOf[ServiceLocator].getName} is " +
-          s"bound to the class ${classOf[NoServiceLocator].getName}. That is a dummy implementation that " +
-          "always fails to locate a service, which is usually fine to use in unit tests."
-      }
-      bind(classOf[ServiceLocator]).to(classOf[NoServiceLocator])
     } else
       logger.debug {
         s"Running in ${environment.mode} mode, hence Lagom is not binding the ${classOf[ServiceLocator].getName} " +
@@ -69,15 +65,13 @@ class ServiceRegistryClientProvider extends Provider[ServiceRegistry] {
   @Inject private var environment: Environment = _
   @Inject private var ec: ExecutionContext = _
   @Inject private var mat: Materializer = _
-  @Inject private var circuitBreaker: CircuitBreaker = _
 
   @Inject private var jacksonSerializerFactory: JacksonSerializerFactory = _
   @Inject private var jacksonExceptionSerializer: JacksonExceptionSerializer = _
 
   lazy val get = {
     val serviceLocator = new ClientServiceLocator(config)
-    val implementor = new ServiceClientImplementor(ws, webSocketClient, serviceInfo, serviceLocator,
-      circuitBreaker, environment)(ec, mat)
+    val implementor = new ServiceClientImplementor(ws, webSocketClient, serviceInfo, serviceLocator, environment)(ec, mat)
     val loader = new ServiceClientLoader(jacksonSerializerFactory, jacksonExceptionSerializer, environment, implementor)
     loader.loadServiceClient(classOf[ServiceRegistry])
   }
@@ -95,14 +89,15 @@ class ServiceRegistryClientProvider extends Provider[ServiceRegistry] {
 
 @Singleton
 class ServiceRegistryServiceLocator @Inject() (
+  circuitBreakers: CircuitBreakers,
   registry:        ServiceRegistry,
   config:          ServiceRegistryServiceLocator.ServiceLocatorConfig,
   implicit val ec: ExecutionContext
-) extends BaseServiceLocator {
+) extends CircuitBreakingServiceLocator(circuitBreakers) {
 
   private val logger: Logger = Logger(this.getClass())
 
-  override protected def lookup(name: String): Future[Optional[URI]] = {
+  override def locate(name: String, serviceCall: Call[_, _]): CompletionStage[Optional[URI]] = {
     require(name != ServiceRegistry.SERVICE_NAME)
     logger.debug(s"Locating service name=[$name] ...")
 
@@ -119,7 +114,7 @@ class ServiceRegistryServiceLocator @Inject() (
         }
       }
       import scala.compat.java8.FutureConverters._
-      registry.lookup().invoke(name, null).toScala.map(asOptionalURI).recover {
+      registry.lookup(name).invoke().toScala.map(asOptionalURI).recover {
         case notFound: NotFound => Optional.empty()
       }
     }
@@ -129,7 +124,7 @@ class ServiceRegistryServiceLocator @Inject() (
         else logger.warn(s"Service name=[$name] was not found. Hint: Maybe it was not registered?")
       case Failure(e) => logger.warn(s"The service locator replied with an error when looking up the service name=[$name] address", e)
     }
-    location
+    location.toJava
   }
 }
 
@@ -137,9 +132,9 @@ abstract class BaseServiceLocator extends ServiceLocator {
   import scala.compat.java8.FutureConverters._
   import scala.concurrent.ExecutionContext.Implicits.global
 
-  override def locate(name: String): CompletionStage[Optional[URI]] = lookup(name).toJava
+  override def locate(name: String, serviceCall: Call[_, _]): CompletionStage[Optional[URI]] = lookup(name).toJava
 
-  override def doWithService[T](name: String, block: JFunction[URI, CompletionStage[T]]): CompletionStage[Optional[T]] = {
+  override def doWithService[T](name: String, serviceCall: Call[_, _], block: JFunction[URI, CompletionStage[T]]): CompletionStage[Optional[T]] = {
     val maybeLocation = lookup(name)
     maybeLocation.flatMap(maybeURI => {
       if (maybeURI.isPresent()) block.apply(maybeURI.get()).toScala.map(Optional.of(_))
@@ -160,9 +155,9 @@ object ServiceRegistryServiceLocator {
 class NoServiceLocator extends ServiceLocator {
   import java.util.concurrent.CompletableFuture
 
-  override def doWithService[T](name: String, block: JFunction[URI, CompletionStage[T]]): CompletionStage[Optional[T]] =
-    CompletableFuture.completedFuture(Optional.empty())
+  override def locate(name: String, serviceCall: Call[_, _]): CompletionStage[Optional[URI]] = ???
+  CompletableFuture.completedFuture(Optional.empty())
 
-  override def locate(name: String): CompletionStage[Optional[URI]] =
-    CompletableFuture.completedFuture(Optional.empty())
+  override def doWithService[T](name: String, serviceCall: Call[_, _], block: JFunction[URI, CompletionStage[T]]): CompletionStage[Optional[T]] = ???
+  CompletableFuture.completedFuture(Optional.empty())
 }

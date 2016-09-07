@@ -11,12 +11,12 @@ import static com.lightbend.lagom.javadsl.api.Service.*;
 
 public interface BlogService4 extends Service {
 
-  ServiceCall<NotUsed, NotUsed, Source<PostPublished, ?>> getNewPosts();
+  ServiceCall<NotUsed, Source<PostPublished, ?>> getNewPosts();
 
   @Override
   default Descriptor descriptor() {
-    return named("/blogservice").with(
-      restCall(Method.GET, "/blogs", getNewPosts())
+    return named("/blogservice").withCalls(
+      restCall(Method.GET, "/blogs", this::getNewPosts)
     );
   }
 }

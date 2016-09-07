@@ -59,7 +59,7 @@ class ServerBuilder @Inject() (environment: Environment, httpConfiguration: Http
           environment.classLoader,
           interface.asSubclass(classOf[Service])
         )
-        ResolvedService(interface, resolveDescriptorToImpl(descriptor, serviceImpl))
+        ResolvedService(interface.asInstanceOf[Class[Any]], serviceImpl, resolveDescriptor(descriptor))
       case (interface, _) =>
         throw new IllegalArgumentException(s"Don't know how to load services that don't implement Service: $interface")
     }
@@ -69,19 +69,10 @@ class ServerBuilder @Inject() (environment: Environment, httpConfiguration: Http
   /**
    * Resolve the given descriptor to the implementation of the service.
    */
-  def resolveDescriptorToImpl(descriptor: Descriptor, serviceImpl: Any): Descriptor = {
-    val resolved = ServiceReader.resolveServiceDescriptor(descriptor, environment.classLoader,
+  def resolveDescriptor(descriptor: Descriptor): Descriptor = {
+    ServiceReader.resolveServiceDescriptor(descriptor, environment.classLoader,
       Map(JacksonPlaceholderSerializerFactory -> jacksonSerializerFactory),
       Map(JacksonPlaceholderExceptionSerializer -> jacksonExceptionSerializer))
-
-    val newEndpoints = resolved.calls.asScala.map { endpoint =>
-      endpoint.serviceCall match {
-        case SelfDescribingServiceCallStub(method, _, _, _) =>
-          val serviceCall = method.invoke(serviceImpl).asInstanceOf[ServiceCall[Any, Any, Any]]
-          endpoint.asInstanceOf[Call[Any, Any, Any]].`with`(serviceCall)
-      }
-    }
-    resolved.replaceAllCalls(TreePVector.from(newEndpoints.asJava))
   }
 
   /**
@@ -104,7 +95,7 @@ class ServerBuilder @Inject() (environment: Environment, httpConfiguration: Http
 }
 
 case class ResolvedServices(services: Seq[ResolvedService[_]])
-case class ResolvedService[T](interface: Class[T], descriptor: Descriptor)
+case class ResolvedService[T](interface: Class[T], service: T, descriptor: Descriptor)
 
 @Singleton
 class ResolvedServicesProvider(bindings: Seq[ServiceGuiceSupport.ServiceBinding[_]]) extends Provider[ResolvedServices] {
@@ -126,7 +117,7 @@ class ServiceRouter @Inject() (resolvedServices: ResolvedServices, httpConfigura
 
   private val serviceRouters = resolvedServices.services.map { service =>
     new SingleServiceRouter(service.descriptor, service.descriptor.calls.asScala.map { call =>
-      ServiceRoute(call)
+      ServiceRoute(call, service.service)
     }, httpConfiguration)
   }
 
@@ -135,7 +126,7 @@ class ServiceRouter @Inject() (resolvedServices: ResolvedServices, httpConfigura
   override def documentation: Seq[(String, String, String)] = serviceRouters.flatMap(_.documentation)
 }
 
-case class ServiceRoute(call: Descriptor.Call[_, _, _]) {
+case class ServiceRoute(call: Descriptor.Call[_, _], service: Any) {
   val path = Path.fromCallId(call.callId)
   val method = call.callId match {
     case rest: RestCallId => rest.method
@@ -147,11 +138,24 @@ case class ServiceRoute(call: Descriptor.Call[_, _, _]) {
   }
   val isWebSocket = call.requestSerializer.isInstanceOf[StreamedMessageSerializer[_]] ||
     call.responseSerializer.isInstanceOf[StreamedMessageSerializer[_]]
+
+  val holder: MethodServiceCallHolder = call.serviceCallHolder() match {
+    case holder: MethodServiceCallHolder => holder
+  }
+
+  def createServiceCall(params: Seq[Seq[String]]) = {
+    holder.create(service, params).asInstanceOf[ServiceCall[Any, Any]]
+  }
+}
+
+object SingleServiceRouter {
+  /** RFC 6455 Section 5.5 - maximum control frame size is 125 bytes */
+  val WebSocketControlFrameMaxLength = 125
 }
 
 class SingleServiceRouter(descriptor: Descriptor, serviceRoutes: Seq[ServiceRoute], httpConfiguration: HttpConfiguration)(implicit ec: ExecutionContext, mat: Materializer) extends SimpleRouter {
 
-  private val headerTransfomers = Seq(descriptor.serviceIdentificationStrategy(), descriptor.protocolNegotiationStrategy())
+  import SingleServiceRouter._
 
   /**
    * The routes partial function.
@@ -164,13 +168,15 @@ class SingleServiceRouter(descriptor: Descriptor, serviceRoutes: Seq[ServiceRout
       // is used) we also match if it's a WebSocket request and this can be handled as a WebSocket.
       if (route.method.name == request.method || (isWebSocket && route.isWebSocket)) {
 
-        route.path.extract(requestHeader.uri.getRawPath, request.queryString).map { rawId =>
+        route.path.extract(requestHeader.uri.getRawPath, request.queryString).map { params =>
+          val serviceCall = route.createServiceCall(params)
+
           // If both request and response are strict, handle it using an action, otherwise handle it using a websocket
           (route.call.requestSerializer, route.call.responseSerializer) match {
             case (strictRequest: StrictMessageSerializer[Any], strictResponse: StrictMessageSerializer[Any]) =>
-              action(route.call.asInstanceOf[Call[Any, Any, Any]], descriptor, strictRequest, strictResponse,
-                requestHeader, rawId)
-            case _ => websocket(route.call, descriptor, requestHeader, rawId)
+              action(route.call.asInstanceOf[Call[Any, Any]], descriptor, strictRequest, strictResponse,
+                requestHeader, serviceCall)
+            case _ => websocket(route.call.asInstanceOf[Call[Any, Any]], descriptor, requestHeader, serviceCall)
           }
         }
       } else None
@@ -184,48 +190,45 @@ class SingleServiceRouter(descriptor: Descriptor, serviceRoutes: Seq[ServiceRout
   /**
    * Create the action.
    */
-  private def action[Id, Request, Response](
-    endpoint: Call[Id, Request, Response], descriptor: Descriptor,
+  private def action[Request, Response](
+    call: Call[Request, Response], descriptor: Descriptor,
     requestSerializer: StrictMessageSerializer[Request], responseSerializer: StrictMessageSerializer[Response],
-    requestHeader: RequestHeader, rawId: RawId
+    requestHeader: RequestHeader, serviceCall: ServiceCall[Request, Response]
   ): EssentialAction = {
 
-    val id = endpoint.idSerializer().deserialize(rawId)
-
-    endpoint.serviceCall match {
+    serviceCall match {
       // If it's a Play service call, then rather than creating the action directly, we let it create the action, and
       // pass it a callback that allows it to convert a service call into an action.
-      case playServiceCall: PlayServiceCall[Id, Request, Response] =>
+      case playServiceCall: PlayServiceCall[Request, Response] =>
         playServiceCall.invoke(
-          id,
-          new java.util.function.Function[ServiceCall[Id, Request, Response], play.mvc.EssentialAction] {
-            override def apply(serviceCall: ServiceCall[Id, Request, Response]): play.mvc.EssentialAction = {
-              createAction(serviceCall, endpoint, descriptor, requestSerializer, responseSerializer, requestHeader, id).asJava
+          new java.util.function.Function[ServiceCall[Request, Response], play.mvc.EssentialAction] {
+            override def apply(serviceCall: ServiceCall[Request, Response]): play.mvc.EssentialAction = {
+              createAction(serviceCall, call, descriptor, requestSerializer, responseSerializer, requestHeader).asJava
             }
           }
         )
       case _ =>
-        createAction(endpoint.serviceCall, endpoint, descriptor, requestSerializer, responseSerializer, requestHeader, id)
+        createAction(serviceCall, call, descriptor, requestSerializer, responseSerializer, requestHeader)
     }
   }
 
   /**
    * Create an action to handle the given service call. All error handling is done here.
    */
-  private def createAction[Id, Request, Response](
-    serviceCall: ServiceCall[Id, Request, Response], endpoint: Call[Id, Request, Response], descriptor: Descriptor,
+  private def createAction[Request, Response](
+    serviceCall: ServiceCall[Request, Response], call: Call[Request, Response], descriptor: Descriptor,
     requestSerializer: StrictMessageSerializer[Request], responseSerializer: StrictMessageSerializer[Response],
-    requestHeader: RequestHeader, id: Id
+    requestHeader: RequestHeader
   ) = EssentialAction { request =>
     try {
-      handleServiceCall(endpoint.serviceCall, descriptor, requestSerializer, responseSerializer, requestHeader, id, request).recover {
+      handleServiceCall(serviceCall, descriptor, requestSerializer, responseSerializer, requestHeader, request).recover {
         case NonFatal(e) =>
-          logException(e, descriptor, endpoint)
+          logException(e, descriptor, call)
           exceptionToResult(descriptor.exceptionSerializer, requestHeader, e)
       }
     } catch {
       case NonFatal(e) =>
-        logException(e, descriptor, endpoint)
+        logException(e, descriptor, call)
         Accumulator.done(exceptionToResult(
           descriptor.exceptionSerializer,
           requestHeader, e
@@ -236,10 +239,10 @@ class SingleServiceRouter(descriptor: Descriptor, serviceRoutes: Seq[ServiceRout
   /**
    * Handle a regular service call, that is, either a ServerServiceCall, or a plain ServiceCall.
    */
-  private def handleServiceCall[Id, Request, Response](
-    serviceCall: ServiceCall[Id, Request, Response], descriptor: Descriptor,
+  private def handleServiceCall[Request, Response](
+    serviceCall: ServiceCall[Request, Response], descriptor: Descriptor,
     requestSerializer: StrictMessageSerializer[Request], responseSerializer: StrictMessageSerializer[Response],
-    requestHeader: RequestHeader, id: Id, playRequestHeader: PlayRequestHeader
+    requestHeader: RequestHeader, playRequestHeader: PlayRequestHeader
   ): Accumulator[ByteString, Result] = {
     val requestMessageDeserializer = requestSerializer.deserializer(requestHeader.protocol)
 
@@ -256,7 +259,7 @@ class SingleServiceRouter(descriptor: Descriptor, serviceRoutes: Seq[ServiceRout
         val request = requestMessageDeserializer.deserialize(body)
 
         // Invoke the service call
-        invokeServiceCall(serviceCall, requestHeader, id, request).map {
+        invokeServiceCall(serviceCall, requestHeader, request).map {
           case (responseHeader, response) =>
             // Serialize the response body
             val serializer = responseSerializer.serializerForResponse(requestHeader.acceptedResponseProtocols())
@@ -269,8 +272,10 @@ class SingleServiceRouter(descriptor: Descriptor, serviceRoutes: Seq[ServiceRout
             } else responseHeader
 
             // Transform the response header
-            val transformedResponseHeader =
-              headerTransfomers.foldRight(responseHeaderWithProtocol)(_.transformServerResponse(_, requestHeader))
+            val transformedResponseHeader = descriptor.headerFilter.transformServerResponse(
+              responseHeaderWithProtocol,
+              requestHeader
+            )
 
             // And create the result
             Results.Status(transformedResponseHeader.status).sendEntity(Strict(
@@ -281,7 +286,7 @@ class SingleServiceRouter(descriptor: Descriptor, serviceRoutes: Seq[ServiceRout
     }
   }
 
-  private def logException(exc: Throwable, descriptor: Descriptor, endpoint: Call[_, _, _]) = {
+  private def logException(exc: Throwable, descriptor: Descriptor, call: Call[_, _]) = {
     def log = Logger(descriptor.name)
     val cause = exc match {
       case c: CompletionException => c.getCause
@@ -292,7 +297,7 @@ class SingleServiceRouter(descriptor: Descriptor, serviceRoutes: Seq[ServiceRout
       case e @ (_: UnsupportedMediaType | _: PayloadTooLarge | _: NotAcceptable) =>
         log.warn(e.getMessage)
       case e =>
-        log.error(s"Exception in ${endpoint.callId()}", e)
+        log.error(s"Exception in ${call.callId()}", e)
     }
   }
 
@@ -301,11 +306,11 @@ class SingleServiceRouter(descriptor: Descriptor, serviceRoutes: Seq[ServiceRout
    */
   private def exceptionToResult(exceptionSerializer: ExceptionSerializer, requestHeader: RequestHeader, e: Throwable): Result = {
     val rawExceptionMessage = exceptionSerializer.serialize(e, requestHeader.acceptedResponseProtocols)
-    val responseHeader = headerTransfomers.foldRight(new ResponseHeader(
+    val responseHeader = descriptor.headerFilter.transformServerResponse(new ResponseHeader(
       rawExceptionMessage.errorCode.http,
       rawExceptionMessage.protocol,
       HashTreePMap.empty()
-    ))(_.transformServerResponse(_, requestHeader))
+    ), requestHeader)
 
     Results.Status(responseHeader.status).sendEntity(Strict(
       rawExceptionMessage.message,
@@ -332,7 +337,7 @@ class SingleServiceRouter(descriptor: Descriptor, serviceRoutes: Seq[ServiceRout
         case (map, (name, values)) => map.plus(name, TreePVector.from(values.asJava))
       }
     )
-    headerTransfomers.foldLeft(requestHeader) { (header, transformer) => transformer.transformServerRequest(header) }
+    descriptor.headerFilter.transformServerRequest(requestHeader)
   }
 
   /**
@@ -347,8 +352,8 @@ class SingleServiceRouter(descriptor: Descriptor, serviceRoutes: Seq[ServiceRout
   /**
    * Handle a service call as a WebSocket.
    */
-  private def websocket[Id, Request, Response](endpoint: Call[Id, Request, Response], descriptor: Descriptor,
-                                               requestHeader: RequestHeader, rawId: RawId): WebSocket = WebSocket.acceptOrResult { rh =>
+  private def websocket[Request, Response](call: Call[Request, Response], descriptor: Descriptor,
+                                           requestHeader: RequestHeader, serviceCall: ServiceCall[Request, Response]): WebSocket = WebSocket.acceptOrResult { rh =>
 
     val requestProtocol = requestHeader.protocol
     val acceptHeaders = requestHeader.acceptedResponseProtocols
@@ -356,8 +361,6 @@ class SingleServiceRouter(descriptor: Descriptor, serviceRoutes: Seq[ServiceRout
     // We need to return a future. Also, we need to handle any exceptions thrown. By doing this asynchronously, we can
     // ensure all exceptions are handled in one place, in the future recover block.
     Future {
-      val id = endpoint.idSerializer().deserialize(rawId)
-
       // A promise for request body, which may be a stream or a single message, depending on the service call.
       // This will be redeemed by the incoming sink, and on redemption, we'll be able to invoke the service call.
       val requestPromise = Promise[Request]()
@@ -368,11 +371,11 @@ class SingleServiceRouter(descriptor: Descriptor, serviceRoutes: Seq[ServiceRout
       // that that outgoing stream close is delayed until the incoming cancels.
       val incomingCancelled = Promise[None.type]()
 
-      val requestMessageDeserializer = endpoint.requestSerializer.deserializer(requestProtocol)
-      val responseMessageSerializer = endpoint.responseSerializer.serializerForResponse(acceptHeaders)
+      val requestMessageDeserializer = call.requestSerializer.deserializer(requestProtocol)
+      val responseMessageSerializer = call.responseSerializer.serializerForResponse(acceptHeaders)
 
       // The incoming sink is the sink that we're going to return to Play to handle incoming websocket messages.
-      val incomingSink: Sink[ByteString, _] = endpoint.requestSerializer match {
+      val incomingSink: Sink[ByteString, _] = call.requestSerializer match {
         // If it's a strict message serializer, we return a sink that reads one message, deserializes that message, and
         // then redeems the request promise with that message.
         case strict: StrictMessageSerializer[Request] =>
@@ -418,7 +421,7 @@ class SingleServiceRouter(descriptor: Descriptor, serviceRoutes: Seq[ServiceRout
           // First we need to get the request
           request <- requestPromise.future
           // Then we can invoke the service call
-          (responseHeader, response) <- invokeServiceCall(endpoint.serviceCall, requestHeader, id, request)
+          (responseHeader, response) <- invokeServiceCall(serviceCall, requestHeader, request)
         } yield {
           if (responseHeader != ResponseHeader.OK) {
             Logger.warn("Response header contains a custom status code and/or custom protocol and/or custom headers, " +
@@ -426,7 +429,7 @@ class SingleServiceRouter(descriptor: Descriptor, serviceRoutes: Seq[ServiceRout
               "This response header will be ignored: " + responseHeader)
           }
 
-          val outgoingSource = endpoint.responseSerializer() match {
+          val outgoingSource = call.responseSerializer() match {
             // If strict, then the source will be a single source of the response message, concatenated with a lazy
             // empty source so that the incoming stream is still able to receive messages.
             case strict: StrictMessageSerializer[Response] =>
@@ -480,33 +483,61 @@ class SingleServiceRouter(descriptor: Descriptor, serviceRoutes: Seq[ServiceRout
         }
       }.recover {
         case NonFatal(e) =>
-          logException(e, descriptor, endpoint)
-          val rawExceptionMessage = descriptor.exceptionSerializer.serialize(e, acceptHeaders)
-          CloseMessage(Some(rawExceptionMessage.errorCode().webSocket()), rawExceptionMessage.messageAsText())
+          logException(e, descriptor, call)
+          exceptionToCloseMessage(e, acceptHeaders)
       })
     }.recover {
       case NonFatal(e) =>
-        logException(e, descriptor, endpoint)
+        logException(e, descriptor, call)
         Left(exceptionToResult(descriptor.exceptionSerializer, requestHeader, e))
     }
+  }
+
+  /** Convert an exception to a close message */
+  private def exceptionToCloseMessage(exception: Throwable, acceptHeaders: PSequence[MessageProtocol]) = {
+    // First attempt to serialize the exception using the exception serializer
+    val rawExceptionMessage = descriptor.exceptionSerializer.serialize(exception, acceptHeaders)
+
+    val safeExceptionMessage = if (rawExceptionMessage.message().size > WebSocketControlFrameMaxLength) {
+      // If the serializer produced an error message that was too big for WebSockets, fall back to a simpler error
+      // message.
+      val truncatedExceptionMessage = descriptor.exceptionSerializer.serialize(
+        new TransportException(
+          rawExceptionMessage.errorCode(),
+          new ExceptionMessage("Error message truncated", "")
+        ), acceptHeaders
+      )
+
+      // It may be that the serialized exception message with no detail is still too big for a WebSocket, fall back to
+      // plain text message.
+      if (truncatedExceptionMessage.message().size > WebSocketControlFrameMaxLength) {
+        new RawExceptionMessage(
+          rawExceptionMessage.errorCode(),
+          new MessageProtocol().withContentType("text/plain").withCharset("utf-8"),
+          ByteString.fromString("Error message truncated")
+        )
+      } else truncatedExceptionMessage
+    } else rawExceptionMessage
+
+    CloseMessage(Some(safeExceptionMessage.errorCode().webSocket()), safeExceptionMessage.messageAsText())
   }
 
   /**
    * Supply the request header to the service call
    */
-  def invokeServiceCall[Id, Request, Response](
-    serviceCall:   ServiceCall[Id, Request, Response],
-    requestHeader: RequestHeader, id: Id, request: Request
+  def invokeServiceCall[Request, Response](
+    serviceCall:   ServiceCall[Request, Response],
+    requestHeader: RequestHeader, request: Request
   ): Future[(ResponseHeader, Response)] = {
     serviceCall match {
-      case play: PlayServiceCall[_, _, _] =>
+      case play: PlayServiceCall[_, _] =>
         throw new IllegalStateException("Can't invoke a Play service call for WebSockets or as a service call passed in by another Play service call: " + play)
       case _ =>
         serviceCall.handleRequestHeader(new JFunction[RequestHeader, RequestHeader] {
           override def apply(t: RequestHeader) = requestHeader
         }).handleResponseHeader(new BiFunction[ResponseHeader, Response, (ResponseHeader, Response)] {
           override def apply(header: ResponseHeader, response: Response) = header -> response
-        }).invoke(id, request).toScala
+        }).invoke(request).toScala
     }
   }
 

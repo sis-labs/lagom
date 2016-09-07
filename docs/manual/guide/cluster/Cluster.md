@@ -10,7 +10,19 @@ If instances of a service need to know about each other, they must join the same
 
 The clustering feature is already included if you are using the [[persistence|PersistentEntity#Dependency]] or [[pubsub|PubSub#Dependency]] modules.
 
-If you want to enable it without those modules, add the following to your project's build:
+If you want to enable it without those modules, add the following dependency your project's build.
+
+In Maven:
+
+```xml
+<dependency>
+    <groupId>com.lightbend.lagom</groupId>
+    <artifactId>lagom-javadsl-cluster_2.11</artifactId>
+    <version>${lagom.version}</version>
+</dependency>
+```
+
+In sbt:
 
 @[cluster-dependency](code/build-cluster.sbt)
 
@@ -69,4 +81,4 @@ If you don't use RP, you should anyway carefully read the documentation of the [
 
 ## Leaving
 
-When using [[Persistent Entities|PersistentEntity]] you can use [PersistentEntityRegistry.gracefulShutdown](api/java/index.html?com/lightbend/lagom/javadsl/persistence/PersistentEntityRegistry.html#gracefulShutdown) to stop the persistent entities and leave the cluster in a graceful way. This is not mandatory but it can be good when you are doing a controlled shutdown of a service node. It will reduce the number of lost in-flight messages during the failover to another node.
+When using [[Persistent Entities|PersistentEntity]] you can use [PersistentEntityRegistry.gracefulShutdown](api/index.html?com/lightbend/lagom/javadsl/persistence/PersistentEntityRegistry.html#gracefulShutdown) to stop the persistent entities and leave the cluster in a graceful way. This is not mandatory but it can be good when you are doing a controlled shutdown of a service node. It will reduce the number of lost in-flight messages during the failover to another node.

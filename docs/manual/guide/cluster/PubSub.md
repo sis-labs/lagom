@@ -6,6 +6,18 @@
 
 To use this feature add the following in your project's build:
 
+In Maven:
+
+```xml
+<dependency>
+    <groupId>com.lightbend.lagom</groupId>
+    <artifactId>lagom-javadsl-pubsub_2.11</artifactId>
+    <version>${lagom.version}</version>
+</dependency>
+```
+
+In sbt:
+
 @[pubsub-dependency](code/build-cluster.sbt)
 
 ## Usage from Service Implementation
@@ -22,9 +34,9 @@ The implementation of this interface looks like:
 
 When a device submit its current temperature it is published to a topic that is unique for that device. Note that the topic where the message is published to is defined by the message class, here `Temperature`, and an optional classifier, here the device id. The messages of this topic will be instances of the message class or subclasses thereof. The qualifier can be used to distinguish topics that are using the same message class. The empty string can be used as qualifier if the message class is enough to define the topic identity.
 
-Use the method `publish` of the [PubSubRef](api/java/index.html?com/lightbend/lagom/javadsl/pubsub/PubSubRef.html) representing a given topic to publish a single message, see `registerTemperature` in the above code.
+Use the method `publish` of the [PubSubRef](api/index.html?com/lightbend/lagom/javadsl/pubsub/PubSubRef.html) representing a given topic to publish a single message, see `registerTemperature` in the above code.
 
-Use the method `subscriber` of the [PubSubRef](api/java/index.html?com/lightbend/lagom/javadsl/pubsub/PubSubRef.html) to acquire a stream `Source` of messages published to a given topic, see `temperatureStream` in the above code.
+Use the method `subscriber` of the [PubSubRef](api/index.html?com/lightbend/lagom/javadsl/pubsub/PubSubRef.html) to acquire a stream `Source` of messages published to a given topic, see `temperatureStream` in the above code.
 
 It is also possible to publish a stream of messages to a topic as is illustrated by this variant of the `SensorService`:
 
@@ -34,7 +46,7 @@ Note how the incoming `Source` in `registerTemperature` is connected to the `pub
 
 ## Usage from Persistent Entity
 
-You can publish messages from a [[Persistent Entity|PersistentEntity]]. First you must inject the [PubSubRegistry](api/java/index.html?com/lightbend/lagom/javadsl/pubsub/PubSubRegistry.html) to get hold of a `PubSubRef` for a given topic.
+You can publish messages from a [[Persistent Entity|PersistentEntity]]. First you must inject the [PubSubRegistry](api/index.html?com/lightbend/lagom/javadsl/pubsub/PubSubRegistry.html) to get hold of a `PubSubRef` for a given topic.
 
 @[inject](code/docs/home/persistence/Post4.java)
 
