@@ -103,7 +103,7 @@ object AggregateEventTag {
    * @param entityId The ID of the entity.
    * @return The selected shard number.
    */
-  def selectShard(numShards: Int, entityId: String) = {
+  def selectShard(numShards: Int, entityId: String): Int = {
     Math.abs(entityId.hashCode) % numShards
   }
 
@@ -114,7 +114,7 @@ object AggregateEventTag {
    * @param shardNo The shard number.
    * @return The name of the shard tag.
    */
-  def shardTag(baseTagName: String, shardNo: Int) = {
+  def shardTag(baseTagName: String, shardNo: Int): String = {
     s"$baseTagName$shardNo"
   }
 }
@@ -134,12 +134,12 @@ final class AggregateEventTag[Event <: AggregateEvent[Event]](
   val tag:       String
 ) {
 
-  override def toString = s"AggregateEventTag($eventType, $tag)"
+  override def toString: String = s"AggregateEventTag($eventType, $tag)"
 
-  override def equals(other: Any) = other match {
+  override def equals(other: Any): Boolean = other match {
     case that: AggregateEventTag[_] => tag == that.tag
     case _                          => false
   }
 
-  override def hashCode() = tag.hashCode
+  override def hashCode(): Int = tag.hashCode
 }
